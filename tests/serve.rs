@@ -212,3 +212,35 @@ fn refuses_to_serve_stdin() {
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("standard input"));
 }
+
+#[test]
+fn refuses_to_serve_fifo() {
+    let dir = TempDir::new().unwrap();
+    let fifo = dir.path().join("pipe");
+    let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+    // Opening a FIFO blocks until the other end opens too, so rtail needs a
+    // writer before it can look at the operand.
+    let writer = {
+        let fifo = fifo.clone();
+        std::thread::spawn(move || OpenOptions::new().write(true).open(fifo))
+    };
+    let output = Command::new(cargo_bin("rtail"))
+        .args(["--serve=127.0.0.1:0", fifo.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    writer.join().unwrap().expect("writer should open the FIFO");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "--serve cannot follow '{}': not a regular file",
+            fifo.display()
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.contains("no files remaining"), "{stderr}");
+}

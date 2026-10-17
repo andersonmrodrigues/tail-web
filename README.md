@@ -61,7 +61,7 @@ the lines that may still be printed. A regular file redirected to standard input
 
 **Following without polling.** After the initial tail, rtail sleeps in
 `kevent` (macOS) or `poll` on an inotify descriptor (Linux) until a followed file
-changes. It calls the syscalls directly through `libc`, in about 300 lines in
+changes. It calls the syscalls directly through `libc`, in about 360 lines in
 [`src/watch`](src/watch). kqueue watches the open descriptor with
 `EVFILT_VNODE`; inotify watches `/proc/self/fd/N`, so both stay attached to the
 file itself when it is renamed. An idle `rtail -f` uses no CPU. `--use-polling`,
@@ -87,8 +87,9 @@ missed instead of slowing the others. When following ends (all files gone, or
 
 `scripts/bench.sh` compares rtail with the system tail using
 [hyperfine](https://github.com/sharkdp/hyperfine), on a generated log file
-(5 GiB by default, `scripts/bench.sh 2` for 2 GiB). Results on an Apple M3 with macOS 26
-(BSD `tail`), 2 GiB file, warm page cache:
+(5 GiB by default, `scripts/bench.sh 2` for 2 GiB). The results below used a
+2 GiB file because the machine was short on disk space, not the 5 GiB default.
+Apple M3 with macOS 26 (BSD `tail`), warm page cache:
 
 | Command | rtail | macOS `tail` |
 |:---|---:|---:|
