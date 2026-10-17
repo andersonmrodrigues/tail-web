@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 
-use crate::reader::{Count, Mode};
+use tail_web::reader::{Count, Mode};
 
 const DEFAULT_LINES: u64 = 10;
 
