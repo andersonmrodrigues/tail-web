@@ -63,6 +63,16 @@ fn run(args: &Args, out: &mut impl Write) -> io::Result<bool> {
     for path in files {
         let name = display_name(path);
         let input = Input::open(path);
+        // A FIFO or device would be read through only to discard the output,
+        // and /dev/zero would never finish, so serve mode refuses it up front.
+        if serving && matches!(input, Ok(Input::Stream(_))) {
+            all_ok = false;
+            eprintln!(
+                "rtail: --serve cannot follow '{}': not a regular file",
+                path.display()
+            );
+            continue;
+        }
         // A file that opened gets its header even if reading it then fails,
         // which is how both GNU and BSD tail report a directory.
         if !matches!(input, Err(Failure::Open(_))) {
