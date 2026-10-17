@@ -18,6 +18,9 @@ pub trait Watcher: Send {
     /// registration when the descriptor is closed.
     fn add(&mut self, token: usize, file: &File) -> io::Result<()>;
 
+    /// Stops watching `token`, before its file is closed and replaced.
+    fn remove(&mut self, token: usize);
+
     /// Blocks until a watched file may have changed or `timeout` elapses
     /// (`None` waits indefinitely). Returns the tokens that saw activity; an
     /// empty list means "unknown", and the caller should check every file.

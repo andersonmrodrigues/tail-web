@@ -60,7 +60,15 @@ pub struct Args {
         default_missing_value = "descriptor",
         value_enum
     )]
-    pub follow: Option<FollowMode>,
+    follow: Option<FollowMode>,
+
+    /// Same as --follow=name --retry: keep following a log across rotation
+    #[arg(short = 'F')]
+    follow_name_retry: bool,
+
+    /// Keep trying to open a file that is missing or becomes inaccessible
+    #[arg(long)]
+    retry: bool,
 
     /// With -f, wake at least every N seconds to check --pid, or to poll when
     /// native notifications are unavailable
@@ -101,6 +109,18 @@ impl Args {
         }
     }
 
+    pub fn follow_mode(&self) -> Option<FollowMode> {
+        if self.follow_name_retry {
+            Some(FollowMode::Name)
+        } else {
+            self.follow
+        }
+    }
+
+    pub fn retry(&self) -> bool {
+        self.retry || self.follow_name_retry
+    }
+
     pub fn mode(&self) -> Mode {
         match (self.lines, self.bytes) {
             (_, Some(count)) => Mode::Bytes(count),
@@ -114,6 +134,8 @@ impl Args {
 pub enum FollowMode {
     /// Keep reading the open file, even after it is renamed
     Descriptor,
+    /// Follow the path: reopen it when log rotation replaces the file
+    Name,
 }
 
 fn parse_interval(value: &str) -> Result<Duration, String> {

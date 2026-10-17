@@ -23,6 +23,8 @@ impl Watcher for Poll {
         Ok(())
     }
 
+    fn remove(&mut self, _token: usize) {}
+
     fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Vec<usize>> {
         let interval = timeout.map_or(self.interval, |t| t.min(self.interval));
         thread::sleep(interval);

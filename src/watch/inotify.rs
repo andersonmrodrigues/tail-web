@@ -98,6 +98,29 @@ impl Watcher for Inotify {
         Ok(())
     }
 
+    /// The watch is on the inode, which outlives our descriptor (a rotated
+    /// log.1 keeps getting written), so it must be removed explicitly.
+    fn remove(&mut self, token: usize) {
+        let Some((&wd, _)) = self
+            .tokens
+            .iter()
+            .find(|(_, tokens)| tokens.contains(&token))
+        else {
+            return;
+        };
+        let tokens = self
+            .tokens
+            .get_mut(&wd)
+            .expect("watch descriptor was just found");
+        tokens.retain(|&t| t != token);
+        if tokens.is_empty() {
+            self.tokens.remove(&wd);
+            // SAFETY: plain syscall on our inotify descriptor. A failure means
+            // the kernel already dropped the watch (IN_IGNORED is queued).
+            unsafe { libc::inotify_rm_watch(self.fd.as_raw_fd(), wd) };
+        }
+    }
+
     fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Vec<usize>> {
         let timeout_ms = timeout.map_or(-1, |d| {
             d.as_millis().min(libc::c_int::MAX as u128) as libc::c_int

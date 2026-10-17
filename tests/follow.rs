@@ -175,17 +175,17 @@ fn reports_truncation_and_prints_from_start() {
 #[test]
 fn descriptor_mode_keeps_reading_a_renamed_file() {
     let dir = TempDir::new().unwrap();
-    let log = file_with(&dir, "log", "");
+    let log = file_with(&dir, "log", "ready\n");
     let mut writer = OpenOptions::new().append(true).open(&log).unwrap();
     let mut rtail = Running::start(&["-f"], &[&log]);
-    // Give rtail time to open the file before it is renamed away.
-    thread::sleep(Duration::from_millis(300));
+    // Once the initial tail is printed, rtail holds the original file open.
+    rtail.stdout.wait_for("ready\n");
 
     fs::rename(&log, dir.path().join("log.1")).unwrap();
     fs::write(&log, "new file, not followed in descriptor mode\n").unwrap();
     writer.write_all(b"written after rename\n").unwrap();
 
-    rtail.stdout.wait_for("written after rename\n");
+    rtail.stdout.wait_for("ready\nwritten after rename\n");
     rtail.stdout.assert_quiet();
 }
 
@@ -227,4 +227,139 @@ fn no_files_remaining() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).ends_with("rtail: no files remaining\n"));
+}
+
+/// Waits until stderr has produced every line in `expected`, in any order,
+/// since a rotation can be seen as "inaccessible then appeared" or as
+/// "replaced" depending on timing.
+fn wait_for_stderr_containing(rtail: &mut Running, expected: &[&str]) {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let text = String::from_utf8_lossy(&rtail.stderr.seen).into_owned();
+        if expected.iter().all(|e| text.contains(e)) {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rtail.stderr.rx.recv_timeout(remaining) {
+            Ok(chunk) => rtail.stderr.seen.extend(chunk),
+            Err(_) => panic!("timed out waiting for {expected:?} on stderr; got {text:?}"),
+        }
+    }
+}
+
+#[test]
+fn name_mode_follows_rename_and_create_rotation() {
+    let dir = TempDir::new().unwrap();
+    let log = file_with(&dir, "log", "gen1\n");
+    let mut old_writer = OpenOptions::new().append(true).open(&log).unwrap();
+    let mut rtail = Running::start(&["-F", "-s", "0.1"], &[&log]);
+    rtail.stdout.wait_for("gen1\n");
+
+    // logrotate's default `create` mode: the logger's last line lands in the
+    // file that is about to be renamed, then a new file takes the name.
+    old_writer
+        .write_all(b"last line before rotation\n")
+        .unwrap();
+    fs::rename(&log, dir.path().join("log.1")).unwrap();
+    fs::write(&log, "gen2\n").unwrap();
+
+    rtail
+        .stdout
+        .wait_for("gen1\nlast line before rotation\ngen2\n");
+    wait_for_stderr_containing(&mut rtail, &["following new file"]);
+
+    append(&log, "gen2 continues\n");
+    rtail
+        .stdout
+        .wait_for("gen1\nlast line before rotation\ngen2\ngen2 continues\n");
+}
+
+#[test]
+fn name_mode_follows_atomic_replace() {
+    let dir = TempDir::new().unwrap();
+    let log = file_with(&dir, "log", "old\n");
+    let mut rtail = Running::start(&["-F", "-s", "0.1"], &[&log]);
+    rtail.stdout.wait_for("old\n");
+
+    let staged = file_with(&dir, "log.tmp", "replacement\n");
+    fs::rename(&staged, &log).unwrap();
+
+    rtail.stdout.wait_for("old\nreplacement\n");
+    wait_for_stderr_containing(
+        &mut rtail,
+        &[&format!(
+            "'{}' has been replaced;  following new file",
+            log.display()
+        )],
+    );
+}
+
+#[test]
+fn name_mode_handles_copytruncate() {
+    let dir = TempDir::new().unwrap();
+    let log = file_with(&dir, "log", "before copytruncate\n");
+    let mut rtail = Running::start(&["-F", "-s", "0.1"], &[&log]);
+    rtail.stdout.wait_for("before copytruncate\n");
+
+    fs::copy(&log, dir.path().join("log.1")).unwrap();
+    File::create(&log).unwrap();
+    rtail
+        .stderr
+        .wait_for(&format!("rtail: {}: file truncated\n", log.display()));
+    append(&log, "after\n");
+    rtail.stdout.wait_for("before copytruncate\nafter\n");
+}
+
+#[test]
+fn name_mode_survives_delete_and_recreate() {
+    let dir = TempDir::new().unwrap();
+    let log = file_with(&dir, "log", "first\n");
+    let mut rtail = Running::start(&["-F", "-s", "0.1"], &[&log]);
+    rtail.stdout.wait_for("first\n");
+
+    fs::remove_file(&log).unwrap();
+    wait_for_stderr_containing(
+        &mut rtail,
+        &[&format!(
+            "'{}' has become inaccessible: No such file or directory",
+            log.display()
+        )],
+    );
+    fs::write(&log, "second\n").unwrap();
+
+    rtail.stdout.wait_for("first\nsecond\n");
+    wait_for_stderr_containing(
+        &mut rtail,
+        &[&format!(
+            "'{}' has appeared;  following new file",
+            log.display()
+        )],
+    );
+}
+
+#[test]
+fn retry_waits_for_a_file_that_does_not_exist_yet() {
+    let dir = TempDir::new().unwrap();
+    let log = dir.path().join("not-yet");
+    let mut rtail = Running::start(&["-F", "-s", "0.1"], &[&log]);
+    wait_for_stderr_containing(&mut rtail, &["cannot open"]);
+
+    fs::write(&log, "hello\n").unwrap();
+    rtail.stdout.wait_for("hello\n");
+    wait_for_stderr_containing(&mut rtail, &["has appeared;  following new file"]);
+}
+
+#[test]
+fn name_mode_without_retry_gives_up() {
+    let dir = TempDir::new().unwrap();
+    let log = file_with(&dir, "log", "x\n");
+    let mut rtail = Running::start(&["--follow=name", "-s", "0.1"], &[&log]);
+    rtail.stdout.wait_for("x\n");
+
+    fs::remove_file(&log).unwrap();
+    assert_eq!(rtail.wait_exit().code(), Some(1));
+    wait_for_stderr_containing(
+        &mut rtail,
+        &["has become inaccessible", "rtail: no files remaining"],
+    );
 }

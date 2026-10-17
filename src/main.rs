@@ -6,10 +6,10 @@ mod watch;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::os::fd::AsFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cli::Args;
+use cli::{Args, FollowMode};
 use follow::{Followed, WriterSink};
 use reader::Mode;
 
@@ -44,6 +44,7 @@ fn run(args: &Args, out: &mut impl Write) -> io::Result<bool> {
     };
     let headers = args.verbose || (!args.quiet && files.len() > 1);
     let mode = args.mode();
+    let follow_mode = args.follow_mode();
 
     let mut all_ok = true;
     let mut first_header = true;
@@ -72,48 +73,60 @@ fn run(args: &Args, out: &mut impl Write) -> io::Result<bool> {
             // Pipes cannot be followed: their data is consumed by the initial
             // tail. GNU tail ignores -f for them too.
             Ok(None) => {}
-            Ok(Some(file)) if args.follow.is_some() => match Followed::new(name, file) {
-                Ok(f) => {
-                    last_printed = Some(followed.len());
-                    followed.push(f);
+            Ok(Some(file)) if follow_mode.is_some() => {
+                match Followed::new(name, operand_path(path), file) {
+                    Ok(f) => {
+                        last_printed = Some(followed.len());
+                        followed.push(f);
+                    }
+                    Err(e) => {
+                        all_ok = false;
+                        eprintln!(
+                            "rtail: cannot follow '{}': {}",
+                            path.display(),
+                            describe(&e)
+                        );
+                    }
                 }
-                Err(e) => {
-                    all_ok = false;
-                    eprintln!(
-                        "rtail: cannot follow '{}': {}",
-                        path.display(),
-                        describe(&e)
-                    );
-                }
-            },
+            }
             Ok(Some(_)) => {}
             Err(Failure::Write(e)) => return Err(e),
             Err(failure) => {
                 all_ok = false;
                 out.flush()?;
                 eprintln!("rtail: {}", failure.message(&name));
+                // With --retry, a file that does not exist yet is watched for.
+                if let (Some(_), true, Failure::Open(_), Some(path)) =
+                    (follow_mode, args.retry(), &failure, operand_path(path))
+                {
+                    followed.push(Followed::missing(name, path));
+                }
             }
         }
     }
 
-    if args.follow.is_some() {
+    if let Some(follow_mode) = follow_mode {
         if !followed.is_empty() {
             out.flush()?;
             let opts = follow::Options {
                 sleep_interval: args.sleep_interval,
                 pid: args.pid,
                 use_polling: args.use_polling,
+                by_name: follow_mode == FollowMode::Name,
+                retry: args.retry(),
             };
-            follow::run(
-                followed,
-                &opts,
-                &mut WriterSink::new(out, headers, last_printed),
-            )?;
+            let mut sink = WriterSink::new(out, headers, last_printed);
+            all_ok &= follow::run(followed, &opts, &mut sink)?;
         } else if !all_ok {
             eprintln!("rtail: no files remaining");
         }
     }
     Ok(all_ok)
+}
+
+/// The path to reopen in name mode; standard input has none.
+fn operand_path(path: &Path) -> Option<PathBuf> {
+    (path != Path::new("-")).then(|| path.to_path_buf())
 }
 
 fn display_name(path: &Path) -> String {
@@ -232,7 +245,7 @@ impl<W: Write> WriteTracker<'_, W> {
 
 /// `io::Error` renders as "No such file or directory (os error 2)"; tail
 /// users expect just the strerror text.
-fn describe(e: &io::Error) -> String {
+pub(crate) fn describe(e: &io::Error) -> String {
     let text = e.to_string();
     match text.rfind(" (os error ") {
         Some(idx) => text[..idx].to_owned(),
