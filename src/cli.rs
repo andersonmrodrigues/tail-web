@@ -1,7 +1,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use crate::reader::{Count, Mode};
 
@@ -49,6 +50,37 @@ pub struct Args {
     #[arg(short, long, overrides_with = "quiet")]
     pub verbose: bool,
 
+    /// Output appended data as the file grows
+    #[arg(
+        short = 'f',
+        long = "follow",
+        value_name = "HOW",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "descriptor",
+        value_enum
+    )]
+    pub follow: Option<FollowMode>,
+
+    /// With -f, wake at least every N seconds to check --pid, or to poll when
+    /// native notifications are unavailable
+    #[arg(
+        short = 's',
+        long = "sleep-interval",
+        value_name = "N",
+        default_value = "1",
+        value_parser = parse_interval
+    )]
+    pub sleep_interval: Duration,
+
+    /// With -f, stop after process PID exits
+    #[arg(long, value_name = "PID")]
+    pub pid: Option<libc::pid_t>,
+
+    /// With -f, poll at the -s interval instead of using kqueue or inotify
+    #[arg(long)]
+    pub use_polling: bool,
+
     /// Files to read; - means standard input
     #[arg(value_name = "FILE")]
     pub files: Vec<PathBuf>,
@@ -76,6 +108,20 @@ impl Args {
             (None, None) => Mode::Lines(Count::Last(DEFAULT_LINES)),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FollowMode {
+    /// Keep reading the open file, even after it is renamed
+    Descriptor,
+}
+
+fn parse_interval(value: &str) -> Result<Duration, String> {
+    value
+        .parse::<f64>()
+        .ok()
+        .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
+        .ok_or_else(|| format!("invalid number of seconds: '{value}'"))
 }
 
 /// Accepts `NUM`, `-NUM` (both mean "last NUM") and `+NUM` ("starting at NUM").
@@ -151,6 +197,30 @@ mod tests {
 
         let argv = ["rtail", "file", "-3"].map(OsString::from);
         assert_eq!(expand_obsolete_count(argv.clone()), argv);
+    }
+
+    #[test]
+    fn parses_follow_options() {
+        let args = parse(&["-f", "-s", "0.25", "--pid", "42", "log"]);
+        assert_eq!(args.follow, Some(FollowMode::Descriptor));
+        assert_eq!(args.sleep_interval, Duration::from_millis(250));
+        assert_eq!(args.pid, Some(42));
+        // `-f` takes its value only with `=`, so `log` stays a file operand.
+        assert_eq!(args.files, [PathBuf::from("log")]);
+
+        assert_eq!(
+            parse(&["--follow=descriptor"]).follow,
+            Some(FollowMode::Descriptor)
+        );
+        assert_eq!(parse(&[]).follow, None);
+        assert_eq!(parse(&[]).sleep_interval, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn rejects_invalid_intervals() {
+        for bad in ["-1", "abc", "inf", "NaN"] {
+            assert!(parse_interval(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 
     #[test]
