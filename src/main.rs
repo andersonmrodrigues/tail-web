@@ -1,6 +1,5 @@
 mod cli;
 mod follow;
-mod reader;
 mod serve;
 mod watch;
 
@@ -12,7 +11,7 @@ use std::process::ExitCode;
 
 use cli::{Args, FollowMode};
 use follow::{Followed, WriterSink};
-use reader::Mode;
+use tail_web::reader::{self, Mode};
 
 fn main() -> ExitCode {
     let args = Args::parse();
