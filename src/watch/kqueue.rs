@@ -56,6 +56,10 @@ impl Watcher for Kqueue {
         Ok(())
     }
 
+    /// The kernel drops a kqueue registration when its descriptor is closed,
+    /// which the caller does right after this, so there is nothing to undo.
+    fn remove(&mut self, _token: usize) {}
+
     fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Vec<usize>> {
         let timeout = timeout.map(|d| libc::timespec {
             tv_sec: d.as_secs().try_into().unwrap_or(libc::time_t::MAX),
