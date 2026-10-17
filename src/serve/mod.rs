@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
@@ -35,6 +35,9 @@ const INDEX: &str = include_str!("index.html");
 const BACKLOG: usize = 5000;
 /// Live lines a slow browser may fall behind by before it is told it lagged.
 const CHANNEL: usize = 4096;
+/// A line longer than this is sent in pieces, so a file without newlines
+/// cannot make the server buffer it whole.
+const MAX_LINE: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 enum Message {
@@ -144,6 +147,10 @@ impl HubSink {
             rest = &rest[newline + 1..];
         }
         partial.extend_from_slice(rest);
+        if partial.len() >= MAX_LINE {
+            hub.publish(Message::Line(line_text(partial)));
+            partial.clear();
+        }
     }
 
     /// Publishes a held partial line, used before a notice so that a file
@@ -218,12 +225,7 @@ pub fn run(
     }
 
     let allowed_hosts = if local.ip().is_loopback() {
-        let port = local.port();
-        Some(Arc::from([
-            format!("localhost:{port}"),
-            format!("127.0.0.1:{port}"),
-            format!("[::1]:{port}"),
-        ]))
+        Some(loopback_hosts(local).into())
     } else {
         eprintln!(
             "rtail: warning: {local} is reachable from other machines; anyone who can connect can read the followed files"
@@ -263,6 +265,29 @@ pub fn run(
     follower
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// The `Host` values a browser sends for this server when it is bound to
+/// loopback. Browsers leave out the port when it is the default, 80.
+fn loopback_hosts(local: SocketAddr) -> Vec<String> {
+    let port = local.port();
+    let bound = match local.ip() {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    let mut hosts = vec![
+        "localhost".to_owned(),
+        "127.0.0.1".to_owned(),
+        "[::1]".to_owned(),
+        bound,
+    ];
+    hosts.sort();
+    hosts.dedup();
+    let mut allowed: Vec<String> = hosts.iter().map(|host| format!("{host}:{port}")).collect();
+    if port == 80 {
+        allowed.extend(hosts);
+    }
+    allowed
 }
 
 fn router(state: AppState) -> Router {
@@ -372,6 +397,42 @@ mod tests {
             lines(&hubs[0])[3..],
             [line("three"), Message::Notice("f0: file truncated".into())]
         );
+    }
+
+    #[test]
+    fn splits_lines_without_newline_at_the_limit() {
+        let hubs = hubs(1);
+        let mut sink = HubSink::new(Arc::clone(&hubs));
+        sink.push(0, &vec![b'x'; MAX_LINE - 1]);
+        assert!(lines(&hubs[0]).is_empty());
+        sink.push(0, b"x");
+        sink.push(0, b"tail\n");
+        let published = lines(&hubs[0]);
+        assert_eq!(published.len(), 2);
+        assert_eq!(published[0], line(&"x".repeat(MAX_LINE)));
+        assert_eq!(published[1], line("tail"));
+    }
+
+    #[test]
+    fn allows_the_hosts_a_browser_sends_on_loopback() {
+        let hosts = loopback_hosts("127.0.0.2:8080".parse().unwrap());
+        for host in [
+            "localhost:8080",
+            "127.0.0.1:8080",
+            "[::1]:8080",
+            "127.0.0.2:8080",
+        ] {
+            assert!(
+                hosts.iter().any(|h| h == host),
+                "{host} missing from {hosts:?}"
+            );
+        }
+        assert!(!hosts.iter().any(|h| h == "localhost"));
+
+        let hosts = loopback_hosts("[::1]:80".parse().unwrap());
+        assert!(hosts.iter().any(|h| h == "localhost"));
+        assert!(hosts.iter().any(|h| h == "[::1]:80"));
+        assert_eq!(hosts.iter().filter(|h| *h == "[::1]:80").count(), 1);
     }
 
     #[test]
