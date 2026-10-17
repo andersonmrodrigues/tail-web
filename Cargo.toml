@@ -1,0 +1,21 @@
+[package]
+name = "tail-web"
+version = "0.1.0"
+edition = "2024"
+description = "tail in Rust: backward seeking, kqueue/inotify following and a live web viewer"
+license = "MIT"
+repository = "https://github.com/andersonmrodrigues/tail-web"
+keywords = ["tail", "cli", "logs", "kqueue", "inotify"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "rtail"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+proptest = "1.12.0"
+tempfile = "3.27.0"
