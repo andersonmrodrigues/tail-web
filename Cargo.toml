@@ -5,6 +5,7 @@ edition = "2024"
 description = "tail in Rust: backward seeking, kqueue/inotify following and a live web viewer"
 license = "MIT"
 repository = "https://github.com/andersonmrodrigues/tail-web"
+readme = "README.md"
 keywords = ["tail", "cli", "logs", "kqueue", "inotify"]
 categories = ["command-line-utilities"]
 
