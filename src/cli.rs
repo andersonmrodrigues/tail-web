@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -89,6 +90,17 @@ pub struct Args {
     #[arg(long)]
     pub use_polling: bool,
 
+    /// Follow the files in a browser at http://ADDR instead of printing them
+    /// (implies -f; ADDR defaults to 127.0.0.1:8080)
+    #[arg(
+        long,
+        value_name = "ADDR",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "127.0.0.1:8080"
+    )]
+    pub serve: Option<SocketAddr>,
+
     /// Files to read; - means standard input
     #[arg(value_name = "FILE")]
     pub files: Vec<PathBuf>,
@@ -112,6 +124,8 @@ impl Args {
     pub fn follow_mode(&self) -> Option<FollowMode> {
         if self.follow_name_retry {
             Some(FollowMode::Name)
+        } else if self.follow.is_none() && self.serve.is_some() {
+            Some(FollowMode::Descriptor)
         } else {
             self.follow
         }
@@ -236,6 +250,18 @@ mod tests {
         );
         assert_eq!(parse(&[]).follow, None);
         assert_eq!(parse(&[]).sleep_interval, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn serve_implies_follow() {
+        let args = parse(&["--serve", "log"]);
+        assert_eq!(args.serve, Some("127.0.0.1:8080".parse().unwrap()));
+        assert_eq!(args.follow_mode(), Some(FollowMode::Descriptor));
+        assert_eq!(args.files, [PathBuf::from("log")]);
+
+        let args = parse(&["-F", "--serve=0.0.0.0:9000", "log"]);
+        assert_eq!(args.serve, Some("0.0.0.0:9000".parse().unwrap()));
+        assert_eq!(args.follow_mode(), Some(FollowMode::Name));
     }
 
     #[test]
