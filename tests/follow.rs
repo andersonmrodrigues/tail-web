@@ -275,6 +275,26 @@ fn name_mode_follows_rename_and_create_rotation() {
 }
 
 #[test]
+fn name_mode_reads_old_file_after_rename_is_noticed() {
+    let dir = TempDir::new().unwrap();
+    let log = file_with(&dir, "log", "gen1\n");
+    let mut old_writer = OpenOptions::new().append(true).open(&log).unwrap();
+    let mut rtail = Running::start(&["-F", "-s", "0.1"], &[&log]);
+    rtail.stdout.wait_for("gen1\n");
+
+    // The rename is reported at once by kqueue/inotify, before the logger has
+    // written its last line to the renamed file and reopened the path.
+    fs::rename(&log, dir.path().join("log.1")).unwrap();
+    wait_for_stderr_containing(&mut rtail, &["has become inaccessible"]);
+    old_writer.write_all(b"late\n").unwrap();
+    rtail.stdout.wait_for("gen1\nlate\n");
+
+    fs::write(&log, "gen2\n").unwrap();
+    rtail.stdout.wait_for("gen1\nlate\ngen2\n");
+    wait_for_stderr_containing(&mut rtail, &["has appeared;  following new file"]);
+}
+
+#[test]
 fn name_mode_follows_atomic_replace() {
     let dir = TempDir::new().unwrap();
     let log = file_with(&dir, "log", "old\n");

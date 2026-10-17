@@ -35,6 +35,9 @@ pub struct Followed {
     open: Option<OpenFile>,
     /// Without `--retry`, a file that becomes inaccessible is dropped.
     gone: bool,
+    /// The path is missing but the file it named is still open and read: a
+    /// logger may keep writing to the renamed file until it reopens the path.
+    orphaned: bool,
 }
 
 struct OpenFile {
@@ -69,6 +72,7 @@ impl Followed {
             path,
             open: Some(OpenFile { file, offset, id }),
             gone: false,
+            orphaned: false,
         })
     }
 
@@ -79,6 +83,7 @@ impl Followed {
             path: Some(path),
             open: None,
             gone: false,
+            orphaned: false,
         }
     }
 }
@@ -252,7 +257,10 @@ impl Follower<'_> {
         let current = fs::metadata(&path);
 
         let replaced = match (&current, &followed.open) {
-            (Ok(metadata), Some(open)) if FileId::of(metadata) == open.id => return Ok(()),
+            (Ok(metadata), Some(open)) if FileId::of(metadata) == open.id => {
+                followed.orphaned = false;
+                return Ok(());
+            }
             (Err(_), None) => return Ok(()),
             (Ok(metadata), open) if !metadata.is_file() => {
                 if open.is_some() {
@@ -268,15 +276,22 @@ impl Follower<'_> {
                 }
                 return Ok(());
             }
+            // Keep reading the old file until a new one shows up at the path:
+            // the rename is reported at once, before the logger is done with it.
+            (Err(_), Some(_)) if followed.orphaned => return Ok(()),
             (Err(e), Some(_)) => {
                 let message = format!(
                     "'{}' has become inaccessible: {}",
                     followed.name,
                     describe(e)
                 );
-                self.close(index, followed, sink)?;
+                if self.opts.retry {
+                    followed.orphaned = true;
+                } else {
+                    self.close(index, followed, sink)?;
+                    followed.gone = true;
+                }
                 sink.notice(index, &message);
-                self.give_up_unless_retrying(followed);
                 return Ok(());
             }
             (Ok(_), open) => open.is_some(),
@@ -287,11 +302,12 @@ impl Follower<'_> {
         }
         match File::open(&path).and_then(|file| file.metadata().map(|m| (file, m))) {
             Ok((file, metadata)) => {
-                let verb = if replaced {
+                let verb = if replaced && !followed.orphaned {
                     "has been replaced"
                 } else {
                     "has appeared"
                 };
+                followed.orphaned = false;
                 sink.notice(
                     index,
                     &format!("'{}' {verb};  following new file", followed.name),
@@ -470,20 +486,25 @@ mod tests {
         };
         let mut sink = Recorder::default();
 
-        // A last line lands in the old file after it is renamed away.
+        // The rename is seen before the logger writes its last lines to the
+        // old file; those must still be printed.
         let mut old_writer = OpenOptions::new().append(true).open(&path).unwrap();
         std::fs::rename(&path, dir.path().join("log.1")).unwrap();
-        old_writer.write_all(b"late\n").unwrap();
         follower.check(0, &mut followed, &mut sink).unwrap();
-        assert_eq!(sink.output, b"late\n");
         assert_eq!(
             sink.notices,
             ["'log' has become inaccessible: No such file or directory"]
         );
+        old_writer.write_all(b"late\n").unwrap();
+        follower.check(0, &mut followed, &mut sink).unwrap();
+        assert_eq!(sink.output, b"late\n");
+        assert_eq!(sink.notices.len(), 1, "the notice is not repeated");
 
+        // Lines written just before the new file appears are printed first.
+        old_writer.write_all(b"later\n").unwrap();
         std::fs::write(&path, b"fresh\n").unwrap();
         follower.check(0, &mut followed, &mut sink).unwrap();
-        assert_eq!(sink.output, b"late\nfresh\n");
+        assert_eq!(sink.output, b"late\nlater\nfresh\n");
         assert_eq!(sink.notices[1], "'log' has appeared;  following new file");
         assert!(!followed.gone);
     }
