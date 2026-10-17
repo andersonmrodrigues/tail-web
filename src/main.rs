@@ -1,6 +1,7 @@
 mod cli;
 mod follow;
 mod reader;
+mod serve;
 mod watch;
 
 use std::fs::File;
@@ -42,13 +43,21 @@ fn run(args: &Args, out: &mut impl Write) -> io::Result<bool> {
     } else {
         &args.files[..]
     };
-    let headers = args.verbose || (!args.quiet && files.len() > 1);
+    let serving = args.serve.is_some();
+    if serving && files.iter().any(|path| path == Path::new("-")) {
+        eprintln!("rtail: --serve cannot follow standard input; name the files to serve");
+        return Ok(false);
+    }
+    let headers = !serving && (args.verbose || (!args.quiet && files.len() > 1));
     let mode = args.mode();
     let follow_mode = args.follow_mode();
 
     let mut all_ok = true;
     let mut first_header = true;
     let mut followed = Vec::new();
+    // With --serve, the initial tail of each followed file goes to the
+    // browser instead of stdout.
+    let mut backlogs = Vec::new();
     // Index in `followed` of the file whose output was printed last, so
     // following it does not repeat the header that is already on screen.
     let mut last_printed = None;
@@ -67,7 +76,9 @@ fn run(args: &Args, out: &mut impl Write) -> io::Result<bool> {
                 writeln!(out, "==> {name} <==")?;
             }
         }
-        let result = input.and_then(|input| input.tail(mode, out));
+        let mut backlog = Vec::new();
+        let mut target: &mut dyn Write = if serving { &mut backlog } else { &mut *out };
+        let result = input.and_then(|input| input.tail(mode, &mut target));
 
         match result {
             // Pipes cannot be followed: their data is consumed by the initial
@@ -78,6 +89,7 @@ fn run(args: &Args, out: &mut impl Write) -> io::Result<bool> {
                     Ok(f) => {
                         last_printed = Some(followed.len());
                         followed.push(f);
+                        backlogs.push(backlog);
                     }
                     Err(e) => {
                         all_ok = false;
@@ -100,6 +112,7 @@ fn run(args: &Args, out: &mut impl Write) -> io::Result<bool> {
                     (follow_mode, args.retry(), &failure, operand_path(path))
                 {
                     followed.push(Followed::missing(name, path));
+                    backlogs.push(Vec::new());
                 }
             }
         }
@@ -115,8 +128,12 @@ fn run(args: &Args, out: &mut impl Write) -> io::Result<bool> {
                 by_name: follow_mode == FollowMode::Name,
                 retry: args.retry(),
             };
-            let mut sink = WriterSink::new(out, headers, last_printed);
-            all_ok &= follow::run(followed, &opts, &mut sink)?;
+            if let Some(addr) = args.serve {
+                all_ok &= serve::run(addr, followed, backlogs, opts)?;
+            } else {
+                let mut sink = WriterSink::new(out, headers, last_printed);
+                all_ok &= follow::run(followed, &opts, &mut sink)?;
+            }
         } else if !all_ok {
             eprintln!("rtail: no files remaining");
         }
