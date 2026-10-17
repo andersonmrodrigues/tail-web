@@ -1,5 +1,7 @@
 mod cli;
+mod follow;
 mod reader;
+mod watch;
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -8,6 +10,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use cli::Args;
+use follow::{Followed, WriterSink};
 use reader::Mode;
 
 fn main() -> ExitCode {
@@ -28,9 +31,10 @@ fn main() -> ExitCode {
     }
 }
 
-/// Tails every file in order. Problems with one file are reported and the
-/// rest are still processed; the return value says whether all succeeded.
-/// Only errors that make further output pointless (a closed stdout) abort.
+/// Tails every file in order, then follows them if asked to. Problems with
+/// one file are reported and the rest are still processed; the return value
+/// says whether all succeeded. Only errors that make further output pointless
+/// (a closed stdout) abort.
 fn run(args: &Args, out: &mut impl Write) -> io::Result<bool> {
     let stdin_only = [Path::new("-").to_path_buf()];
     let files = if args.files.is_empty() {
@@ -43,28 +47,70 @@ fn run(args: &Args, out: &mut impl Write) -> io::Result<bool> {
 
     let mut all_ok = true;
     let mut first_header = true;
+    let mut followed = Vec::new();
+    // Index in `followed` of the file whose output was printed last, so
+    // following it does not repeat the header that is already on screen.
+    let mut last_printed = None;
     for path in files {
         let name = display_name(path);
         let input = Input::open(path);
         // A file that opened gets its header even if reading it then fails,
         // which is how both GNU and BSD tail report a directory.
-        if headers && !matches!(input, Err(Failure::Open(_))) {
-            if !first_header {
-                writeln!(out)?;
+        if !matches!(input, Err(Failure::Open(_))) {
+            last_printed = None;
+            if headers {
+                if !first_header {
+                    writeln!(out)?;
+                }
+                first_header = false;
+                writeln!(out, "==> {name} <==")?;
             }
-            first_header = false;
-            writeln!(out, "==> {name} <==")?;
         }
         let result = input.and_then(|input| input.tail(mode, out));
 
         match result {
-            Ok(()) => {}
+            // Pipes cannot be followed: their data is consumed by the initial
+            // tail. GNU tail ignores -f for them too.
+            Ok(None) => {}
+            Ok(Some(file)) if args.follow.is_some() => match Followed::new(name, file) {
+                Ok(f) => {
+                    last_printed = Some(followed.len());
+                    followed.push(f);
+                }
+                Err(e) => {
+                    all_ok = false;
+                    eprintln!(
+                        "rtail: cannot follow '{}': {}",
+                        path.display(),
+                        describe(&e)
+                    );
+                }
+            },
+            Ok(Some(_)) => {}
             Err(Failure::Write(e)) => return Err(e),
             Err(failure) => {
                 all_ok = false;
                 out.flush()?;
                 eprintln!("rtail: {}", failure.message(&name));
             }
+        }
+    }
+
+    if args.follow.is_some() {
+        if !followed.is_empty() {
+            out.flush()?;
+            let opts = follow::Options {
+                sleep_interval: args.sleep_interval,
+                pid: args.pid,
+                use_polling: args.use_polling,
+            };
+            follow::run(
+                followed,
+                &opts,
+                &mut WriterSink::new(out, headers, last_printed),
+            )?;
+        } else if !all_ok {
+            eprintln!("rtail: no files remaining");
         }
     }
     Ok(all_ok)
@@ -136,20 +182,24 @@ impl Input {
         }
     }
 
-    fn tail(self, mode: Mode, out: &mut impl Write) -> Result<(), Failure> {
+    /// Prints the tail. Returns the file, positioned after the last byte
+    /// printed, when it is a regular file that can be followed.
+    fn tail(self, mode: Mode, out: &mut impl Write) -> Result<Option<File>, Failure> {
         let mut out = WriteTracker {
             inner: out,
             error: None,
         };
         let result = match self {
-            Input::Seekable(mut file) => reader::tail_seekable(&mut file, mode, &mut out),
-            Input::Stream(file) => reader::tail_stream(file, mode, &mut out),
-            Input::Stdin(stdin) => reader::tail_stream(stdin.lock(), mode, &mut out),
+            Input::Seekable(mut file) => {
+                reader::tail_seekable(&mut file, mode, &mut out).map(|()| Some(file))
+            }
+            Input::Stream(file) => reader::tail_stream(file, mode, &mut out).map(|()| None),
+            Input::Stdin(stdin) => reader::tail_stream(stdin.lock(), mode, &mut out).map(|()| None),
         };
         match (result, out.error) {
             (_, Some(e)) => Err(Failure::Write(e)),
             (Err(e), None) => Err(Failure::Read(e)),
-            (Ok(()), None) => Ok(()),
+            (Ok(file), None) => Ok(file),
         }
     }
 }
