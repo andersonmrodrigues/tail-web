@@ -124,7 +124,8 @@ differences:
 - A directory operand is an error (`Is a directory`, exit 1), as in GNU tail.
   BSD tail on macOS prints nothing for it and exits 0.
 - `-f` on a pipe is ignored, as in GNU tail.
-- In web mode, a line is shown once its newline arrives.
+- In web mode, a line is shown once its newline arrives (or once it reaches
+  64 KiB, to bound memory).
 
 ## Development
 
